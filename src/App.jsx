@@ -6,6 +6,78 @@ const SPARKS = [
   { x: 92, y: 42, d: 1.2 }, { x: 36, y: 86, d: 0.3 }, { x: 64, y: 88, d: 0.9 },
 ];
 
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const DAYS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+function sameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+function Calendar() {
+  const today = new Date();
+  const [view, setView] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
+  const [selected, setSelected] = useState(today);
+
+  const year = view.getFullYear();
+  const month = view.getMonth();
+  const firstWeekday = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  const cells = [];
+  for (let i = 0; i < firstWeekday; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d));
+
+  const goTo = (delta) => setView(new Date(year, month + delta, 1));
+  const goToday = () => {
+    setView(new Date(today.getFullYear(), today.getMonth(), 1));
+    setSelected(today);
+  };
+
+  return (
+    <section className="calendar" aria-label="Calendar">
+      <div className="cal-head">
+        <button className="cal-btn" onClick={() => goTo(-1)} aria-label="Previous month">‹</button>
+        <h2 className="cal-title">{MONTHS[month]} {year}</h2>
+        <button className="cal-btn" onClick={() => goTo(1)} aria-label="Next month">›</button>
+      </div>
+
+      <div className="cal-grid cal-days">
+        {DAYS.map((d) => <span key={d}>{d}</span>)}
+      </div>
+
+      <div className="cal-grid">
+        {cells.map((date, i) =>
+          date ? (
+            <button
+              key={i}
+              className={
+                "cal-cell" +
+                (sameDay(date, today) ? " is-today" : "") +
+                (sameDay(date, selected) ? " is-selected" : "") +
+                (date.getDay() === 0 ? " is-sunday" : "")
+              }
+              onClick={() => setSelected(date)}
+              aria-label={date.toDateString()}
+              aria-pressed={sameDay(date, selected)}
+            >
+              {date.getDate()}
+            </button>
+          ) : (
+            <span key={i} />
+          )
+        )}
+      </div>
+
+      <div className="cal-foot">
+        <p className="cal-selected">
+          {selected.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+        </p>
+        <button className="cal-today" onClick={goToday}>Today</button>
+      </div>
+    </section>
+  );
+}
+
 function Rangoli() {
   const petals = Array.from({ length: 12 }, (_, i) => i * 30);
   return (
@@ -64,12 +136,11 @@ export default function App() {
 
   return (
     <main className="page">
-      <h1 className="greeting">
-        Hello
-        <br />
-        Gopal.
-      </h1>
-      <p className="tagline">This is my first app.</p>
+      <header>
+        <h1 className="greeting">Hello Gopal.</h1>
+        <p className="tagline">This is my first app.</p>
+      </header>
+      <Calendar />
     </main>
   );
 }
