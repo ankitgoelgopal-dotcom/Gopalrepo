@@ -45,6 +45,10 @@ jobs:
           s, n1 = re.subn(r"versionCode\s+\d+", "versionCode " + os.environ["RUN_NUMBER"], s, count=1)
           s, n2 = re.subn(r'versionName\s+"[^"]*"', 'versionName "1.0.' + os.environ["RUN_NUMBER"] + '"', s, count=1)
 
+          # 1) point the existing release build type at the signing config
+          s, n4 = re.subn(r"(buildTypes\s*\{\s*release\s*\{)", r"\1\n            signingConfig signingConfigs.release", s, count=1)
+
+          # 2) define the signing config just before buildTypes
           signing = '''signingConfigs {
                   release {
                       storeFile file(System.getenv("KS_PATH"))
@@ -55,7 +59,6 @@ jobs:
               }
               buildTypes {'''
           s, n3 = re.subn(r"buildTypes\s*\{", signing, s, count=1)
-          s, n4 = re.subn(r"(release\s*\{)", r"\1\n            signingConfig signingConfigs.release", s, count=1)
 
           assert n1 and n2 and n3 and n4, (n1, n2, n3, n4)
           open(p, "w").write(s)
