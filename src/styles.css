@@ -61,3 +61,32 @@ body {
     to { opacity: 1; transform: none; }
   }
 }
+
+.loading {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+}
+
+.spinner {
+  width: 56px;
+  height: 56px;
+  border: 5px solid var(--muted);
+  border-top-color: var(--marigold);
+  border-radius: 50%;
+}
+
+.loading-text {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #b9c2d9;
+  letter-spacing: 0.05em;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .spinner { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+}
