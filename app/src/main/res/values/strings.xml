@@ -1,0 +1,5 @@
+<resources>
+    <!-- Rename your keyboard here -->
+    <string name="app_name">My Language Keyboard</string>
+    <string name="subtype_label">My Language</string>
+</resources>
