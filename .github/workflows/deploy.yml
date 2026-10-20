@@ -71,11 +71,19 @@ jobs:
           KS_PASS: gopal-app-2026
         run: ./gradlew assembleRelease
 
+      - name: Name the APK
+        run: cp android/app/build/outputs/apk/release/app-release.apk hello-gopal.apk
+
+      - name: Upload APK to Actions tab (direct .apk, no zip)
+        uses: actions/upload-artifact@v7
+        with:
+          path: hello-gopal.apk
+          archive: false
+
       - name: Publish APK to a GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp android/app/build/outputs/apk/release/app-release.apk hello-gopal.apk
           gh release create "apk-${{ github.run_number }}" hello-gopal.apk \
             --title "Hello Gopal APK #${{ github.run_number }}" \
             --notes "Signed APK built from commit ${{ github.sha }}."
