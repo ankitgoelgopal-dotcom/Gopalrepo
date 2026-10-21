@@ -15,6 +15,7 @@ object Dictionary {
         val lowWords: Array<String>,
         val lowMeanings: Array<String>,
         val sorted: IntArray,
+        val sortedM: IntArray,
         val stamp: Long
     )
 
@@ -72,7 +73,8 @@ object Dictionary {
             val lw = Array(words.size) { words[it].word.lowercase() }
             val lm = Array(words.size) { words[it].meaning.lowercase() }
             val sorted = (0 until words.size).sortedBy { lw[it] }.toIntArray()
-            snap = Snap(words, lw, lm, sorted, stamp)
+            val sortedM = (0 until words.size).sortedBy { lm[it] }.toIntArray()
+            snap = Snap(words, lw, lm, sorted, sortedM, stamp)
         }
     }
 
@@ -106,22 +108,33 @@ object Dictionary {
         return out
     }
 
-    /** English meaning lookup: type "food" and get the language word. */
+    /** English meaning lookup (binary search on a sorted index, so it stays fast). */
     fun byMeaning(query: String, limit: Int): List<Entry> {
         val s = snap ?: return emptyList()
         if (query.isEmpty()) return emptyList()
         val q = query.lowercase()
-        val exact = ArrayList<Entry>()
-        val starts = ArrayList<Entry>()
-        for (i in s.words.indices) {
-            val m = s.lowMeanings[i]
-            if (m == q) {
-                if (exact.size < limit) exact.add(s.words[i])
-            } else if (starts.size < limit && m.startsWith(q)) {
-                starts.add(s.words[i])
-            }
-            if (exact.size >= limit && starts.size >= limit) break
+        var lo = 0
+        var hi = s.sortedM.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (s.lowMeanings[s.sortedM[mid]] < q) lo = mid + 1 else hi = mid
         }
-        return (exact + starts).take(limit)
+        val exact = ArrayList<Int>()
+        val best = ArrayList<Int>()
+        var i = lo
+        while (i < s.sortedM.size) {
+            val r = s.sortedM[i]
+            val m = s.lowMeanings[r]
+            if (!m.startsWith(q)) break
+            if (m == q) {
+                if (exact.size < limit) exact.add(r)
+            } else if (best.size < limit || r < best[best.size - 1]) {
+                val pos = best.binarySearch(r)
+                best.add(-pos - 1, r)
+                if (best.size > limit) best.removeAt(best.size - 1)
+            }
+            i++
+        }
+        return (exact + best).take(limit).map { s.words[it] }
     }
 }

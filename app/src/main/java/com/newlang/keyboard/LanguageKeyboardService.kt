@@ -7,6 +7,7 @@ import android.graphics.drawable.StateListDrawable
 import android.inputmethodservice.InputMethodService
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -22,6 +23,7 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
+import java.util.concurrent.Executors
 
 class LanguageKeyboardService : InputMethodService() {
 
@@ -34,6 +36,20 @@ class LanguageKeyboardService : InputMethodService() {
     private var shift = 0            // 0 = off, 1 = once, 2 = caps lock
     private var symbols = false
     private val handler = Handler(Looper.getMainLooper())
+
+    // --- speed: suggestions are computed off the main thread, vibration too ---
+    private val worker = Executors.newSingleThreadExecutor()
+    @Volatile private var suggestSeq = 0
+    private var chipKey: String? = null
+    private val vibThread = HandlerThread("kb-vibrate").also { it.start() }
+    private val vibHandler = Handler(vibThread.looper)
+    private val vibrator: Vibrator? by lazy { getSystemService(VIBRATOR_SERVICE) as? Vibrator }
+    private val effects = HashMap<Long, VibrationEffect>()
+
+    // --- speed: letter keys are updated in place instead of rebuilding the keyboard ---
+    private class LetterKey(val tv: TextView, val row: Int, val col: Int)
+    private val letterKeys = ArrayList<LetterKey>()
+    private var shiftKey: TextView? = null
 
     private var rootView: LinearLayout? = null
     private lateinit var keysContainer: LinearLayout
@@ -67,11 +83,16 @@ class LanguageKeyboardService : InputMethodService() {
         super.onCreate()
         loadConfig()
         Prefs.sp(this).registerOnSharedPreferenceChangeListener(prefListener)
-        Thread { Dictionary.load(applicationContext) }.start()
+        Thread {
+            Dictionary.load(applicationContext)
+            handler.post { updateSuggestions() }
+        }.start()
     }
 
     override fun onDestroy() {
         Prefs.sp(this).unregisterOnSharedPreferenceChangeListener(prefListener)
+        worker.shutdownNow()
+        vibThread.quitSafely()
         super.onDestroy()
     }
 
@@ -86,6 +107,7 @@ class LanguageKeyboardService : InputMethodService() {
         loadConfig()
         rootView?.setBackgroundColor(th.bg)
         if (::stripScroll.isInitialized) stripScroll.setBackgroundColor(th.strip)
+        chipKey = null
         if (::keysContainer.isInitialized) {
             renderKeys()
             updateSuggestions()
@@ -133,12 +155,17 @@ class LanguageKeyboardService : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         composing.clear()
+        val wasSymbols = symbols
         symbols = false
-        shift = 0
-        Thread { Dictionary.load(applicationContext) }.start()
+        if (!Dictionary.ready) Thread { Dictionary.load(applicationContext) }.start()
         if (::keysContainer.isInitialized) {
+            if (wasSymbols) {
+                shift = 0
+                renderKeys()
+            } else {
+                setShift(0)
+            }
             autoCap()
-            renderKeys()
             updateSuggestions()
         }
     }
@@ -166,6 +193,8 @@ class LanguageKeyboardService : InputMethodService() {
 
     private fun renderKeys() {
         keysContainer.removeAllViews()
+        letterKeys.clear()
+        shiftKey = null
         val lay = curLayout()
         stripScroll.visibility = if (lay.latin && cfg.suggestions) View.VISIBLE else View.GONE
 
@@ -176,25 +205,26 @@ class LanguageKeyboardService : InputMethodService() {
 
         if (!symbols) {
             val rows = if (shift != 0) lay.shifted else lay.normal
-            keysContainer.addView(row(rows[0].map { charKey(it) }))
+            keysContainer.addView(row(rows[0].mapIndexed { c, t -> letterKey(0, c, t) }))
 
             val r2 = ArrayList<View>()
             val pad2 = rows[1].size <= 9
             if (pad2) r2.add(spacer(0.5f))
-            rows[1].forEach { r2.add(charKey(it)) }
+            rows[1].forEachIndexed { c, t -> r2.add(letterKey(1, c, t)) }
             if (pad2) r2.add(spacer(0.5f))
             keysContainer.addView(row(r2))
 
             val r3 = ArrayList<View>()
             val shiftLabel = when (shift) { 0 -> "⇧"; 1 -> "⬆"; else -> "⇪" }
-            r3.add(key(shiftLabel, 1.5f, if (shift != 0) accent else th.special,
+            val sk = key(shiftLabel, 1.5f, if (shift != 0) accent else th.special,
                 textColor = if (shift != 0) Color.WHITE else th.text) {
-                shift = (shift + 1) % 3
-                renderKeys()
-            })
+                setShift((shift + 1) % 3)
+            }
+            shiftKey = sk
+            r3.add(sk)
             val missing = 7 - rows[2].size
             if (missing > 0) r3.add(spacer(missing / 2f))
-            rows[2].forEach { r3.add(charKey(it)) }
+            rows[2].forEachIndexed { c, t -> r3.add(letterKey(2, c, t)) }
             if (missing > 0) r3.add(spacer(missing / 2f))
             r3.add(backspaceKey())
             keysContainer.addView(row(r3))
@@ -252,15 +282,54 @@ class LanguageKeyboardService : InputMethodService() {
         return v
     }
 
-    private fun charKey(s: String, weight: Float = 1f): TextView {
-        return key(s, weight, th.key, alts = Alts.get(s)) {
+    private fun afterChar() {
+        if (shift == 1 && !symbols) setShift(0)
+    }
+
+    private fun charKey(s: String, weight: Float = 1f): TextView =
+        key(s, weight, th.key, alts = Alts.get(s), fireOnDown = true) {
             typeText(s)
-            if (shift == 1 && !symbols) {
-                shift = 0
-                renderKeys()
-            }
-            autoCap()
+            afterChar()
         }
+
+    /** A letter of the main page; its text changes in place when shift changes. */
+    private fun letterKey(r: Int, c: Int, label: String): TextView {
+        val holder = arrayOfNulls<TextView>(1)
+        val tv = key(label, 1f, th.key,
+            altsFn = { Alts.get(holder[0]?.text?.toString() ?: label) },
+            fireOnDown = true) {
+            typeText(holder[0]?.text?.toString() ?: label)
+            afterChar()
+        }
+        holder[0] = tv
+        letterKeys.add(LetterKey(tv, r, c))
+        return tv
+    }
+
+    private fun setShift(n: Int) {
+        if (n == shift) return
+        val lettersChange = (n != 0) != (shift != 0)
+        shift = n
+        if (symbols) return
+        if (lettersChange) refreshLetters()
+        refreshShiftKey()
+    }
+
+    private fun refreshLetters() {
+        val lay = curLayout()
+        val rows = if (shift != 0) lay.shifted else lay.normal
+        for (k in letterKeys) {
+            val t = rows.getOrNull(k.row)?.getOrNull(k.col) ?: continue
+            k.tv.text = t
+            k.tv.textSize = if (t.length > 1) 14f else 19f
+        }
+    }
+
+    private fun refreshShiftKey() {
+        val sk = shiftKey ?: return
+        sk.text = when (shift) { 0 -> "⇧"; 1 -> "⬆"; else -> "⇪" }
+        sk.background = bgDrawable(if (shift != 0) accent else th.special)
+        sk.setTextColor(if (shift != 0) Color.WHITE else th.text)
     }
 
     private fun key(
@@ -268,6 +337,8 @@ class LanguageKeyboardService : InputMethodService() {
         weight: Float,
         color: Int,
         alts: List<String> = emptyList(),
+        altsFn: (() -> List<String>)? = null,
+        fireOnDown: Boolean = false,
         textColor: Int = th.text,
         onTap: () -> Unit
     ): TextView {
@@ -283,20 +354,30 @@ class LanguageKeyboardService : InputMethodService() {
         tv.layoutParams = lp
 
         var longFired = false
+        var firedDown = false
         val longRunnable = Runnable {
-            if (alts.isNotEmpty()) {
+            val a = altsFn?.invoke() ?: alts
+            if (a.isNotEmpty()) {
                 longFired = true
                 buzz()
-                showPopup(tv, alts)
+                showPopup(tv, a)
             }
         }
         tv.setOnTouchListener { v, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     longFired = false
+                    firedDown = false
                     v.isPressed = true
                     buzz()
-                    if (cfg.longPress && alts.isNotEmpty()) handler.postDelayed(longRunnable, 350)
+                    val a = altsFn?.invoke() ?: alts
+                    if (cfg.longPress && a.isNotEmpty()) {
+                        handler.postDelayed(longRunnable, 350)
+                    } else if (fireOnDown) {
+                        // no long-press possible: type immediately on touch-down (fastest)
+                        firedDown = true
+                        onTap()
+                    }
                 }
                 MotionEvent.ACTION_MOVE -> {
                     if (longFired) updatePopup(e.rawX)
@@ -307,7 +388,7 @@ class LanguageKeyboardService : InputMethodService() {
                     if (longFired) {
                         val chosen = dismissPopup()
                         if (chosen != null) commitAlt(chosen)
-                    } else {
+                    } else if (!firedDown) {
                         val slop = dp(10).toFloat()
                         if (e.x >= -slop && e.x <= v.width + slop && e.y >= -slop && e.y <= v.height + slop) {
                             onTap()
@@ -387,11 +468,19 @@ class LanguageKeyboardService : InputMethodService() {
     private fun buzz() {
         val ms = Prefs.vibMs[cfg.vibration]
         if (ms <= 0L) return
-        val vib = getSystemService(VIBRATOR_SERVICE) as? Vibrator ?: return
-        if (Build.VERSION.SDK_INT >= 26) {
-            vib.vibrate(VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-            vib.vibrate(ms)
+        vibHandler.post {
+            val vib = vibrator ?: return@post
+            try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    val fx = effects.getOrPut(ms) {
+                        VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)
+                    }
+                    vib.vibrate(fx)
+                } else {
+                    vib.vibrate(ms)
+                }
+            } catch (e: Exception) {
+            }
         }
     }
 
@@ -472,11 +561,7 @@ class LanguageKeyboardService : InputMethodService() {
 
     private fun commitAlt(s: String) {
         typeText(s)
-        if (shift == 1 && !symbols) {
-            shift = 0
-            renderKeys()
-        }
-        autoCap()
+        afterChar()
     }
 
     // ---------------------------------------------------------------- typing
@@ -546,7 +631,7 @@ class LanguageKeyboardService : InputMethodService() {
             sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
         }
         updateSuggestions()
-        autoCap()
+        if (composing.isEmpty()) autoCap()
     }
 
     private fun pick(e: Entry) {
@@ -579,39 +664,60 @@ class LanguageKeyboardService : InputMethodService() {
                         (trimmed.endsWith(".") || trimmed.endsWith("!") || trimmed.endsWith("?")))
             }
         }
-        val newShift = if (want) 1 else 0
-        if (newShift != shift) {
-            shift = newShift
-            renderKeys()
-        }
+        setShift(if (want) 1 else 0)
     }
 
     // ----------------------------------------------------------- suggestions
 
+    private fun showChips(items: List<Pair<String, Entry?>>) {
+        val key = items.joinToString("\u0001") { it.first }
+        if (key == chipKey) return
+        chipKey = key
+        strip.removeAllViews()
+        for ((t, e) in items) addChip(t, e)
+        stripScroll.scrollTo(0, 0)
+    }
+
     private fun updateSuggestions() {
         if (!::strip.isInitialized) return
-        strip.removeAllViews()
-        if (!curLayout().latin || !cfg.suggestions) return
+        if (!curLayout().latin || !cfg.suggestions) {
+            suggestSeq++
+            showChips(emptyList())
+            return
+        }
         if (composing.isEmpty()) {
-            addChip("Type a word or its English meaning…", null)
-            stripScroll.scrollTo(0, 0)
+            suggestSeq++
+            showChips(listOf<Pair<String, Entry?>>(Pair("Type a word or its English meaning…", null)))
             return
         }
         if (!Dictionary.ready) {
-            addChip("Loading dictionary…", null)
+            suggestSeq++
+            showChips(listOf<Pair<String, Entry?>>(Pair("Loading dictionary…", null)))
             return
         }
         val s = composing.toString()
-        val byWord = Dictionary.byWord(s, 10)
-        val byMeaning =
-            if (s.none { it.isDigit() }) Dictionary.byMeaning(s, 10) else emptyList()
-        val all = byWord + byMeaning.filter { m -> byWord.none { it.word == m.word } }
-        if (all.isEmpty()) {
-            addChip("No match", null)
-        } else {
-            for (e in all) addChip("${e.word}  ·  ${e.meaning}", e)
+        val seq = ++suggestSeq
+        try {
+            worker.execute {
+                try {
+                    if (seq != suggestSeq) return@execute
+                    val byWord = Dictionary.byWord(s, 8)
+                    val byMeaning =
+                        if (s.none { it.isDigit() }) Dictionary.byMeaning(s, 6) else emptyList()
+                    val all = byWord + byMeaning.filter { m -> byWord.none { it.word == m.word } }
+                    if (seq != suggestSeq) return@execute
+                    val items: List<Pair<String, Entry?>> =
+                        if (all.isEmpty()) {
+                            listOf<Pair<String, Entry?>>(Pair("No match", null))
+                        } else {
+                            all.map { Pair<String, Entry?>(it.word + "  ·  " + it.meaning, it) }
+                        }
+                    handler.post { if (seq == suggestSeq) showChips(items) }
+                } catch (e: Exception) {
+                }
+            }
+        } catch (e: Exception) {
         }
-        stripScroll.scrollTo(0, 0)
     }
 
     private fun addChip(text: String, entry: Entry?) {

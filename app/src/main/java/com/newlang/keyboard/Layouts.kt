@@ -52,7 +52,8 @@ object Layouts {
         private set
 
     /** Builtin layouts followed by the custom one (custom is always the last index). */
-    val all: List<KbLayout> get() = builtins + custom
+    var all: List<KbLayout> = builtins + custom
+        private set
 
     private fun tokens(line: String): List<String> {
         val t = line.trim()
@@ -91,6 +92,7 @@ object Layouts {
             p.getString("customShifted", "") ?: "",
             p.getBoolean("customLatin", true)
         )
+        all = builtins + custom
     }
 }
 
