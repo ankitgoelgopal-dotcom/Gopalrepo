@@ -1,17 +1,19 @@
 # My Language Keyboard (Android system keyboard / IME)
 
-Works in every app (WhatsApp, Chrome, Notes ...) once enabled, like a hieroglyph or futhark keyboard.
+Works in every app (WhatsApp, Chrome, Notes ...) once enabled.
 
-## Build the APK
-1. Install Android Studio (free).
-2. File > Open > select this folder (NewLanguageKeyboard). Let Gradle sync.
-3. Plug in your phone (USB debugging on) and press Run, or Build > Build APK(s).
-4. Install the APK, open the app, tap "1. Enable keyboard" then "2. Choose keyboard".
+## Install
+Every push to `main` builds an APK and publishes it under **Releases**. Download, install, open the app,
+tap "1. Enable keyboard" then "2. Choose keyboard".
 
-## Features
-- Full QWERTY + number row (all your words end in numbers) + symbols page
-- Suggestion bar: type "lo" -> loka1 · food ; or type English "food" -> loka1
-- Vi key inserts the plural marker
-- Family words, plural system and particles included
-- Dictionary: app/src/main/assets/dictionary.tsv (word<TAB>meaning). Edit/add lines freely.
-- Rename the keyboard in app/src/main/res/values/strings.xml
+## Settings (open the app, everything applies instantly)
+- **Keys & layout:** number row on/off, choose which layouts are active (English, AZERTY, QWERTZ, Hindi, Russian,
+  Spanish, Greek, Arabic, Custom), and a **custom layout editor** to add / remove / rearrange keys.
+- **Suggestions:** on/off, plus your own words (`word = meaning`) on top of the built-in dictionary.
+- **Look:** theme, accent colour, key height, key shape.
+- **Behavior:** vibration strength, long-press popups, auto-capitalisation.
+- **App:** keyboard name (space bar + app header) and launcher icon colour.
+
+## Files
+- Built-in dictionary: `app/src/main/assets/dictionary.tsv` (word<TAB>meaning)
+- Name shown in Android's keyboard list: `app/src/main/res/values/strings.xml`

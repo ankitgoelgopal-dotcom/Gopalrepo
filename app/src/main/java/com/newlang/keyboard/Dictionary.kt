@@ -1,57 +1,98 @@
 package com.newlang.keyboard
 
 import android.content.Context
+import java.io.File
 
 class Entry(val word: String, val meaning: String)
 
-/** Loads assets/dictionary.tsv (word <TAB> meaning) and answers prefix queries. */
+/**
+ * Loads assets/dictionary.tsv plus the user's custom words (filesDir/custom_words.tsv).
+ * Custom words come first, so they get the highest suggestion priority.
+ */
 object Dictionary {
+    private class Snap(
+        val words: Array<Entry>,
+        val lowWords: Array<String>,
+        val lowMeanings: Array<String>,
+        val sorted: IntArray,
+        val stamp: Long
+    )
+
     @Volatile
-    var ready = false
-        private set
+    private var snap: Snap? = null
 
-    private var words: Array<Entry> = emptyArray()      // in priority order
-    private var lowWords: Array<String> = emptyArray()
-    private var lowMeanings: Array<String> = emptyArray()
-    private var sorted: IntArray = IntArray(0)          // indices sorted by word
+    val ready: Boolean get() = snap != null
+    val size: Int get() = snap?.words?.size ?: 0
 
-    val size: Int get() = words.size
+    private fun customFile(ctx: Context) = File(ctx.filesDir, "custom_words.tsv")
+
+    fun parseLine(line: String): Pair<String, String>? {
+        for (sep in charArrayOf('\t', '=', '|')) {
+            val i = line.indexOf(sep)
+            if (i > 0) {
+                val w = line.substring(0, i).trim()
+                val m = line.substring(i + 1).trim()
+                if (w.isNotEmpty() && m.isNotEmpty()) return Pair(w, m)
+            }
+        }
+        return null
+    }
+
+    fun readCustom(ctx: Context): List<Pair<String, String>> {
+        val f = customFile(ctx)
+        if (!f.exists()) return emptyList()
+        return f.readLines(Charsets.UTF_8).mapNotNull { parseLine(it) }
+    }
+
+    fun writeCustom(ctx: Context, list: List<Pair<String, String>>) {
+        val f = customFile(ctx)
+        if (list.isEmpty()) {
+            f.delete()
+        } else {
+            f.writeText(list.joinToString("\n") { it.first + "\t" + it.second }, Charsets.UTF_8)
+        }
+    }
 
     fun load(ctx: Context) {
-        if (ready) return
+        val stamp = customFile(ctx).lastModified()
+        val cur0 = snap
+        if (cur0 != null && cur0.stamp == stamp) return
         synchronized(this) {
-            if (ready) return
+            val cur = snap
+            if (cur != null && cur.stamp == stamp) return
             val list = ArrayList<Entry>(90000)
+            for ((w, m) in readCustom(ctx)) list.add(Entry(w, m))
             ctx.assets.open("dictionary.tsv").bufferedReader(Charsets.UTF_8).useLines { lines ->
                 for (l in lines) {
                     val t = l.indexOf('\t')
                     if (t > 0) list.add(Entry(l.substring(0, t), l.substring(t + 1)))
                 }
             }
-            words = list.toTypedArray()
-            lowWords = Array(words.size) { words[it].word.lowercase() }
-            lowMeanings = Array(words.size) { words[it].meaning.lowercase() }
-            sorted = (0 until words.size).sortedBy { lowWords[it] }.toIntArray()
-            ready = true
+            val words = list.toTypedArray()
+            val lw = Array(words.size) { words[it].word.lowercase() }
+            val lm = Array(words.size) { words[it].meaning.lowercase() }
+            val sorted = (0 until words.size).sortedBy { lw[it] }.toIntArray()
+            snap = Snap(words, lw, lm, sorted, stamp)
         }
     }
 
     /** Words that start with [prefix]; exact match first, then by priority. */
     fun byWord(prefix: String, limit: Int): List<Entry> {
-        if (!ready || prefix.isEmpty()) return emptyList()
+        val s = snap ?: return emptyList()
+        if (prefix.isEmpty()) return emptyList()
         val p = prefix.lowercase()
         var lo = 0
-        var hi = sorted.size
+        var hi = s.sorted.size
         while (lo < hi) {
             val mid = (lo + hi) ushr 1
-            if (lowWords[sorted[mid]] < p) lo = mid + 1 else hi = mid
+            if (s.lowWords[s.sorted[mid]] < p) lo = mid + 1 else hi = mid
         }
         val best = ArrayList<Int>()
         var exact = -1
         var i = lo
-        while (i < sorted.size && lowWords[sorted[i]].startsWith(p)) {
-            val r = sorted[i]
-            if (lowWords[r] == p) exact = r
+        while (i < s.sorted.size && s.lowWords[s.sorted[i]].startsWith(p)) {
+            val r = s.sorted[i]
+            if (s.lowWords[r] == p && exact < 0) exact = r
             if (best.size < limit || r < best[best.size - 1]) {
                 val pos = best.binarySearch(r)
                 best.add(-pos - 1, r)
@@ -60,23 +101,24 @@ object Dictionary {
             i++
         }
         val out = ArrayList<Entry>()
-        if (exact >= 0) out.add(words[exact])
-        for (r in best) if (r != exact) out.add(words[r])
+        if (exact >= 0) out.add(s.words[exact])
+        for (r in best) if (r != exact) out.add(s.words[r])
         return out
     }
 
     /** English meaning lookup: type "food" and get the language word. */
     fun byMeaning(query: String, limit: Int): List<Entry> {
-        if (!ready || query.isEmpty()) return emptyList()
+        val s = snap ?: return emptyList()
+        if (query.isEmpty()) return emptyList()
         val q = query.lowercase()
         val exact = ArrayList<Entry>()
         val starts = ArrayList<Entry>()
-        for (i in words.indices) {
-            val m = lowMeanings[i]
+        for (i in s.words.indices) {
+            val m = s.lowMeanings[i]
             if (m == q) {
-                if (exact.size < limit) exact.add(words[i])
+                if (exact.size < limit) exact.add(s.words[i])
             } else if (starts.size < limit && m.startsWith(q)) {
-                starts.add(words[i])
+                starts.add(s.words[i])
             }
             if (exact.size >= limit && starts.size >= limit) break
         }
