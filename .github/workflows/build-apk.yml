@@ -26,10 +26,10 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Build debug APK
+      - name: Build release APK
         run: |
           set +e
-          gradle assembleDebug --no-daemon --stacktrace > build.log 2>&1
+          gradle assembleRelease --no-daemon --stacktrace > build.log 2>&1
           CODE=$?
           if [ $CODE -ne 0 ]; then
             MSG=$(grep -E "^e: |What went wrong|Caused by|Could not|error:|FAILED|SDK|license" -A2 build.log | head -40 | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
@@ -40,14 +40,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: NewLanguageKeyboard-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/release/app-release.apk
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk NewLanguageKeyboard.apk
+          cp app/build/outputs/apk/release/app-release.apk NewLanguageKeyboard.apk
           TAG="build-${{ github.run_number }}"
           gh release create "$TAG" NewLanguageKeyboard.apk \
             --title "Keyboard APK build ${{ github.run_number }}" \
-            --notes "Debug APK built from commit ${{ github.sha }}"
+            --notes "APK built from commit ${{ github.sha }}"
