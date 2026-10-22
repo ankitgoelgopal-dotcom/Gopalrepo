@@ -8,9 +8,10 @@ import java.net.URL
 /** Minimal Google Gemini (generateContent) client. The key is sent in a header, never in the URL. */
 object Gemini {
     const val DEFAULT_MODEL = "gemini-3.8-flash"
-    private const val BASE = "https://generativelanguage.googleapis.com/v1beta/"
+    private const val ROOT = "https://generativelanguage.googleapis.com/"
+    private const val BASE = ROOT + "v1beta/"
 
-    class Result(val text: String?, val error: String?, val model: String)
+    class Result(val text: String?, val error: String?, val model: String, val api: String = "")
 
     private class Resp(val code: Int, val body: String)
 
@@ -51,6 +52,69 @@ object Gemini {
         if (thinking) gc.put("thinkingConfig", JSONObject().put("thinkingLevel", "low"))
         body.put("generationConfig", gc)
         return http(BASE + "models/" + model + ":generateContent", key, body.toString())
+    }
+
+    // ------------------------------------------------ Interactions API (new format)
+
+    private fun interactionsOnce(
+        path: String, key: String, model: String, system: String, prompt: String, variant: Int
+    ): Resp {
+        val body = JSONObject()
+            .put("model", model)
+            .put("input", prompt)
+            .put("system_instruction", system)
+        if (variant <= 1) body.put("store", false)   // do not keep the user's text on Google's side
+        if (variant == 0) {
+            val gc = JSONObject().put("temperature", 0.2)
+            if (model.startsWith("gemini-3")) gc.put("thinking_level", "low")
+            body.put("generation_config", gc)
+        }
+        return http(ROOT + path + "/interactions", key, body.toString())
+    }
+
+    /** Tries the newest endpoint first; drops optional fields if the server rejects them (HTTP 400). */
+    private fun interactions(key: String, model: String, system: String, prompt: String): Resp {
+        var r = Resp(0, "")
+        for (path in listOf("v1beta2", "v1beta")) {
+            for (variant in 0..2) {
+                r = interactionsOnce(path, key, model, system, prompt, variant)
+                if (r.code != 400) break
+            }
+            if (r.code != 404) return r
+        }
+        return r
+    }
+
+    private fun extractInteraction(body: String): String? {
+        return try {
+            val root = JSONObject(body)
+            val sb = StringBuilder()
+            val steps = root.optJSONArray("steps")
+            if (steps != null) {
+                // the last model_output step holds the final answer
+                for (i in steps.length() - 1 downTo 0) {
+                    val st = steps.getJSONObject(i)
+                    if (st.optString("type") != "model_output") continue
+                    val content = st.optJSONArray("content") ?: continue
+                    for (j in 0 until content.length()) {
+                        val c = content.getJSONObject(j)
+                        if (c.optString("type", "text") == "text") sb.append(c.optString("text", ""))
+                    }
+                    break
+                }
+            }
+            if (sb.isBlank()) {
+                // older revision: "outputs" list
+                val outs = root.optJSONArray("outputs")
+                if (outs != null && outs.length() > 0) {
+                    sb.append(outs.getJSONObject(outs.length() - 1).optString("text", ""))
+                }
+            }
+            val t = sb.toString()
+            if (t.isBlank()) null else t
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun extract(body: String): String? {
@@ -113,26 +177,30 @@ object Gemini {
     fun run(key: String, model0: String, system: String, prompt: String): Result {
         var model = model0.ifBlank { DEFAULT_MODEL }
         try {
-            var r = generate(key, model, system, prompt, model.startsWith("gemini-3"))
-            if (r.code == 400 && model.startsWith("gemini-3")) {
-                r = generate(key, model, system, prompt, false)
-            }
+            var api = "Interactions API"
+            var r = interactions(key, model, system, prompt)
             if (r.code == 404) {
+                // maybe the model does not exist for this key: pick the newest Flash model
                 val alt = pickModel(key)
                 if (alt != null && alt != model) {
                     model = alt
-                    r = generate(key, model, system, prompt, model.startsWith("gemini-3"))
-                    if (r.code == 400 && model.startsWith("gemini-3")) {
-                        r = generate(key, model, system, prompt, false)
-                    }
+                    r = interactions(key, model, system, prompt)
+                }
+            }
+            if (r.code == 404) {
+                // last resort: the classic generateContent format
+                api = "generateContent (fallback)"
+                r = generate(key, model, system, prompt, model.startsWith("gemini-3"))
+                if (r.code == 400 && model.startsWith("gemini-3")) {
+                    r = generate(key, model, system, prompt, false)
                 }
             }
             if (r.code in 200..299) {
-                val t = extract(r.body)
-                return if (t != null) Result(t, null, model)
-                else Result(null, "AI returned no text (empty or blocked)", model)
+                val t = if (api.startsWith("Interactions")) extractInteraction(r.body) else extract(r.body)
+                return if (t != null) Result(t, null, model, api)
+                else Result(null, "AI returned no text (empty or blocked)", model, api)
             }
-            return Result(null, errorText(r), model)
+            return Result(null, errorText(r), model, api)
         } catch (e: Exception) {
             return Result(null, "Network error: " + (e.message ?: e.javaClass.simpleName), model)
         }

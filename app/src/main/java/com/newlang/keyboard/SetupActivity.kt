@@ -353,7 +353,7 @@ class SetupActivity : Activity() {
                 Thread {
                     val r = Gemini.run(k, m, "Reply with the single word OK.", "Say OK")
                     runOnUiThread {
-                        toast(if (r.text != null) "Key works \u2714 (" + r.model + ")" else (r.error ?: "Failed"))
+                        toast(if (r.text != null) "Key works \u2714 (" + r.model + ", " + r.api + ")" else (r.error ?: "Failed"))
                     }
                 }.start()
             }
