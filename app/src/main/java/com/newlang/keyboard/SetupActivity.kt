@@ -109,6 +109,10 @@ class SetupActivity : Activity() {
         toggle("Long-press popups (accents and extra characters)", "longPress", true)
         toggle("Auto-capitalise at the start of sentences", "autoCap", true)
 
+        // ------------------------------------------------ AI
+        header("AI (Google Gemini)")
+        aiSection()
+
         // ------------------------------------------------ app
         header("App")
         nameEditor()
@@ -281,6 +285,78 @@ class SetupActivity : Activity() {
             // bump a preference so the running keyboard reloads the dictionary right away
             sp.edit().putLong("dictRev", System.currentTimeMillis()).apply()
             toast("${list.size} words saved")
+        }
+    }
+
+    private fun aiSection() {
+        note(
+            "Get a key at aistudio.google.com/apikey and paste it here. It is stored encrypted on this phone. " +
+                "Your text is sent to Google only when you tap \u2728 Fix or \u21C4 Translate on the keyboard, " +
+                "never in password fields. Select text first to change only that part; otherwise the whole field is used."
+        )
+        toggle("Show the AI bar on the keyboard", "aiEnabled", true)
+
+        val savedHint = "Key saved \u2714 (paste a new one to replace it)"
+        val emptyHint = "Paste your Gemini API key"
+        val keyBox = EditText(this)
+        keyBox.hint = if (SecretStore.has(sp)) savedHint else emptyHint
+        keyBox.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        keyBox.setSingleLine(true)
+        col.addView(
+            keyBox,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        button("Save key") {
+            val k = keyBox.text.toString().trim()
+            if (k.length < 20) {
+                toast("That does not look like an API key")
+            } else {
+                try {
+                    SecretStore.save(sp, k)
+                    keyBox.setText("")
+                    keyBox.hint = savedHint
+                    toast("Key saved")
+                } catch (e: Exception) {
+                    toast("Could not store the key securely")
+                }
+            }
+        }
+        button("Remove key") {
+            SecretStore.save(sp, "")
+            keyBox.hint = emptyHint
+            toast("Key removed")
+        }
+
+        note("Name of your language (the AI is told this):")
+        val lang = editor("e.g. Kangri", sp.getString("aiLang", "") ?: "", 1)
+        note("Optional notes about the language (script, grammar, spelling rules):")
+        val notes = editor("(optional)", sp.getString("aiNotes", "") ?: "", 3)
+        note("Model (leave it unless you know you need another one):")
+        val model = editor(Gemini.DEFAULT_MODEL, sp.getString("aiModel", "") ?: "", 1)
+        button("Save language & model") {
+            sp.edit()
+                .putString("aiLang", lang.text.toString().trim())
+                .putString("aiNotes", notes.text.toString().trim())
+                .putString("aiModel", model.text.toString().trim())
+                .apply()
+            toast("Saved")
+        }
+        button("Test key") {
+            val k = SecretStore.load(sp)
+            if (k == null) {
+                toast("Save a key first")
+            } else {
+                toast("Testing\u2026")
+                val m = model.text.toString().trim()
+                Thread {
+                    val r = Gemini.run(k, m, "Reply with the single word OK.", "Say OK")
+                    runOnUiThread {
+                        toast(if (r.text != null) "Key works \u2714 (" + r.model + ")" else (r.error ?: "Failed"))
+                    }
+                }.start()
+            }
         }
     }
 

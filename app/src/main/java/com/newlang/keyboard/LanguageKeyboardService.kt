@@ -17,6 +17,7 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
@@ -45,6 +46,17 @@ class LanguageKeyboardService : InputMethodService() {
     private val vibHandler = Handler(vibThread.looper)
     private val vibrator: Vibrator? by lazy { getSystemService(VIBRATOR_SERVICE) as? Vibrator }
     private val effects = HashMap<Long, VibrationEffect>()
+
+    // --- AI (Gemini) bar ---
+    private lateinit var aiBar: LinearLayout
+    private lateinit var aiStatus: TextView
+    private val aiExec = Executors.newSingleThreadExecutor()
+    private var aiBusy = false
+    private var aiAllowed = true
+    private var aiMessage = ""
+    private var aiUndo: String? = null
+    private var aiUndoLen = 0
+    private var aiUndoWhole = false
 
     // --- speed: letter keys are updated in place instead of rebuilding the keyboard ---
     private class LetterKey(val tv: TextView, val row: Int, val col: Int)
@@ -92,6 +104,7 @@ class LanguageKeyboardService : InputMethodService() {
     override fun onDestroy() {
         Prefs.sp(this).unregisterOnSharedPreferenceChangeListener(prefListener)
         worker.shutdownNow()
+        aiExec.shutdownNow()
         vibThread.quitSafely()
         super.onDestroy()
     }
@@ -107,6 +120,7 @@ class LanguageKeyboardService : InputMethodService() {
         loadConfig()
         rootView?.setBackgroundColor(th.bg)
         if (::stripScroll.isInitialized) stripScroll.setBackgroundColor(th.strip)
+        if (::aiBar.isInitialized) rebuildAiBar()
         chipKey = null
         if (::keysContainer.isInitialized) {
             renderKeys()
@@ -132,6 +146,15 @@ class LanguageKeyboardService : InputMethodService() {
             strip,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, dp(44))
         )
+        aiBar = LinearLayout(this)
+        aiBar.orientation = LinearLayout.HORIZONTAL
+        aiBar.gravity = Gravity.CENTER_VERTICAL
+        aiBar.setPadding(dp(6), 0, dp(6), 0)
+        root.addView(
+            aiBar,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(36))
+        )
+        rebuildAiBar()
         root.addView(
             stripScroll,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44))
@@ -155,6 +178,16 @@ class LanguageKeyboardService : InputMethodService() {
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         composing.clear()
+        aiUndo = null
+        val itype = info?.inputType ?: 0
+        val icls = itype and InputType.TYPE_MASK_CLASS
+        val ivar = itype and InputType.TYPE_MASK_VARIATION
+        aiAllowed = !(icls == InputType.TYPE_CLASS_TEXT && (
+            ivar == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                ivar == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
+                ivar == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD)) &&
+            !(icls == InputType.TYPE_CLASS_NUMBER && ivar == InputType.TYPE_NUMBER_VARIATION_PASSWORD)
+        if (::aiBar.isInitialized) rebuildAiBar()
         val wasSymbols = symbols
         symbols = false
         if (!Dictionary.ready) Thread { Dictionary.load(applicationContext) }.start()
@@ -718,6 +751,153 @@ class LanguageKeyboardService : InputMethodService() {
             }
         } catch (e: Exception) {
         }
+    }
+
+    // ------------------------------------------------------------------ AI bar
+
+    private fun aiMsg(m: String) {
+        aiMessage = m
+        if (::aiStatus.isInitialized) aiStatus.text = m
+    }
+
+    private fun aiButton(label: String, onClick: () -> Unit): TextView {
+        val tv = TextView(this)
+        tv.text = label
+        tv.textSize = 13f
+        tv.setTextColor(th.text)
+        tv.gravity = Gravity.CENTER
+        tv.setPadding(dp(12), 0, dp(12), 0)
+        tv.background = bgDrawable(th.key)
+        tv.setOnClickListener { onClick() }
+        val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, dp(30))
+        lp.rightMargin = dp(6)
+        tv.layoutParams = lp
+        return tv
+    }
+
+    private fun rebuildAiBar() {
+        aiBar.removeAllViews()
+        val sp = Prefs.sp(this)
+        val show = aiAllowed && sp.getBoolean("aiEnabled", true) && SecretStore.has(sp)
+        aiBar.visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) return
+        aiBar.setBackgroundColor(th.strip)
+        aiBar.addView(aiButton("\u2728 Fix") { runAi(true) })
+        aiBar.addView(aiButton("\u21C4 Translate") { runAi(false) })
+        if (aiUndo != null) aiBar.addView(aiButton("\u21A9 Undo") { undoAi() })
+        aiStatus = TextView(this)
+        aiStatus.textSize = 12f
+        aiStatus.setTextColor(th.text)
+        aiStatus.alpha = 0.7f
+        aiStatus.maxLines = 1
+        aiStatus.ellipsize = android.text.TextUtils.TruncateAt.END
+        aiStatus.gravity = Gravity.CENTER_VERTICAL
+        aiStatus.setPadding(dp(6), 0, 0, 0)
+        aiStatus.text = aiMessage
+        aiBar.addView(aiStatus, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+    }
+
+    /** Looks up each word of the text in the user's dictionary, so the AI can rely on it. */
+    private fun buildHints(text: String): String {
+        if (!Dictionary.ready) return ""
+        val toks = text.split(Regex("[^\\p{L}\\p{M}]+")).map { it.lowercase() }
+            .filter { it.length >= 2 }.distinct().take(40)
+        val sb = StringBuilder()
+        for (t in toks) {
+            val w = Dictionary.byWord(t, 1).firstOrNull()
+            if (w != null && w.word.lowercase() == t) {
+                sb.append(w.word).append(" = ").append(w.meaning).append('\n')
+                continue
+            }
+            for (m in Dictionary.byMeaning(t, 2)) {
+                val ml = m.meaning.lowercase()
+                if (ml == t || ml.startsWith(t + " ") || ml.startsWith(t + ",") ||
+                    ml.startsWith(t + ";") || ml.startsWith(t + "(")
+                ) {
+                    sb.append(m.word).append(" = ").append(m.meaning).append('\n')
+                }
+            }
+        }
+        return sb.toString().take(6000)
+    }
+
+    private fun runAi(fix: Boolean) {
+        if (aiBusy) return
+        val sp = Prefs.sp(this)
+        val key = SecretStore.load(sp)
+        if (key == null) {
+            aiMsg("Add your Gemini key in the app")
+            return
+        }
+        val ic = currentInputConnection ?: return
+        val selected = ic.getSelectedText(0)
+        val hasSel = !selected.isNullOrEmpty()
+        val text: String = if (hasSel) {
+            selected.toString()
+        } else {
+            ic.getExtractedText(ExtractedTextRequest(), 0)?.text?.toString() ?: ""
+        }
+        if (text.isBlank()) {
+            aiMsg("Type some text first")
+            return
+        }
+        if (text.length > 4000) {
+            aiMsg("Text too long (max 4000 characters)")
+            return
+        }
+        composing.clear()
+        updateSuggestions()
+        aiBusy = true
+        aiMsg("Thinking\u2026")
+        val model = (sp.getString("aiModel", "") ?: "").ifBlank { Gemini.DEFAULT_MODEL }
+        val lang = (sp.getString("aiLang", "") ?: "").trim().ifEmpty { "the user's own language" }
+        val notes = sp.getString("aiNotes", "") ?: ""
+        val fieldId = currentInputEditorInfo?.fieldId
+        aiExec.execute {
+            val hints = buildHints(text)
+            val system = Gemini.systemPrompt(lang, notes)
+            val prompt = if (fix) Gemini.fixPrompt(lang, hints, text) else Gemini.translatePrompt(lang, hints, text)
+            val r = Gemini.run(key, model, system, prompt)
+            handler.post {
+                aiBusy = false
+                val out = r.text?.trim()
+                val ic2 = currentInputConnection
+                if (out == null) {
+                    aiMsg(r.error ?: "AI error")
+                } else if (ic2 == null || currentInputEditorInfo?.fieldId != fieldId) {
+                    aiMsg("Field changed, nothing applied")
+                } else if (hasSel && ic2.getSelectedText(0)?.toString() != text) {
+                    aiMsg("Selection changed, nothing applied")
+                } else {
+                    ic2.beginBatchEdit()
+                    if (!hasSel) ic2.performContextMenuAction(android.R.id.selectAll)
+                    ic2.commitText(out, 1)
+                    ic2.endBatchEdit()
+                    aiUndo = text
+                    aiUndoLen = out.length
+                    aiUndoWhole = !hasSel
+                    if (r.model != model) sp.edit().putString("aiModel", r.model).apply()
+                    aiMessage = "Done \u2713"
+                    rebuildAiBar()
+                }
+            }
+        }
+    }
+
+    private fun undoAi() {
+        val orig = aiUndo ?: return
+        val ic = currentInputConnection ?: return
+        ic.beginBatchEdit()
+        if (aiUndoWhole) {
+            ic.performContextMenuAction(android.R.id.selectAll)
+        } else {
+            ic.deleteSurroundingText(aiUndoLen, 0)
+        }
+        ic.commitText(orig, 1)
+        ic.endBatchEdit()
+        aiUndo = null
+        aiMessage = "Undone"
+        rebuildAiBar()
     }
 
     private fun addChip(text: String, entry: Entry?) {
