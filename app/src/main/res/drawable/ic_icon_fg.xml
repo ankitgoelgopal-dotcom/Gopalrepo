@@ -1,0 +1,15 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- soft shadow -->
+    <path android:fillColor="#33000000" android:pathData="M29,51h50a5,5 0 0 1 5,5v22a5,5 0 0 1 -5,5h-50a5,5 0 0 1 -5,-5v-22a5,5 0 0 1 5,-5z" />
+    <!-- keyboard body -->
+    <path android:fillColor="#FFFFFF" android:pathData="M29,48h50a5,5 0 0 1 5,5v22a5,5 0 0 1 -5,5h-50a5,5 0 0 1 -5,-5v-22a5,5 0 0 1 5,-5z" />
+    <!-- keys -->
+    <path android:fillColor="#D5D8F0" android:pathData="M28,53h7v6h-7zM37,53h7v6h-7zM46,53h7v6h-7zM55,53h7v6h-7zM64,53h7v6h-7zM73,53h7v6h-7zM33,62h7v6h-7zM42,62h7v6h-7zM51,62h7v6h-7zM60,62h7v6h-7zM69,62h7v6h-7zM36,71h36v5h-36z" />
+    <!-- AI badge -->
+    <path android:fillColor="#FFC83D" android:pathData="M61,36a13,13 0 1,0 26,0a13,13 0 1,0 -26,0z" />
+    <path android:fillColor="#4A3FBF" android:pathData="M74,28Q75.5,34.5 82,36Q75.5,37.5 74,44Q72.5,37.5 66,36Q72.5,34.5 74,28Z" />
+</vector>
